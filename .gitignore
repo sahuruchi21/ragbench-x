@@ -1,0 +1,66 @@
+# ============================
+# Secrets & Environment
+# ============================
+.env
+.env.*
+!.env.example
+
+# ============================
+# Python Virtual Environments
+# ============================
+venv/
+.venv/
+.venv-1/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ============================
+# Python cache & test artifacts
+# ============================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.log
+
+# ============================
+# Node / Frontend
+# ============================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ============================
+# Benchmark Results (large data)
+# ============================
+backend/data/results/benchmark_results.json
+backend/data/results/eval_results.json
+
+# ============================
+# ML Model Cache (large files)
+# ============================
+*.bin
+*.safetensors
+*.onnx
+~/.cache/huggingface/
+.cache/
+
+# ============================
+# OS artifacts
+# ============================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
