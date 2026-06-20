@@ -35,6 +35,7 @@ def run_rag_pipeline(
     rerank_k: int = 15,
     llm_provider: str = "groq",
     llm_model: Optional[str] = None,
+    is_custom: bool = False,
 ) -> Dict:
 
     start_time = time.time()
@@ -161,7 +162,8 @@ def run_rag_pipeline(
         query,
         context_chunks,
         provider=llm_provider,
-        model_name=llm_model
+        model_name=llm_model,
+        is_custom=is_custom,
     )
 
     gen_time=(

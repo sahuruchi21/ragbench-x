@@ -239,17 +239,30 @@ def run_benchmark(req: BenchmarkRequest):
             # Seed docs go first so retriever sees them with high priority
             documents = seed_docs + hf_docs
 
-            # Richer query hint: include the full question and extracted keywords
+            # Only append a query hint if no seed doc already covers the question.
+            # This prevents the hollow keyword-echo document from outscoring real
+            # knowledge passages in retrieval (old bug: hint always scored ~9 vs ~2-3
+            # for real docs, causing the LLM to parrot the hint back as the answer).
             import re as _re
             _stop = {'a','an','the','is','are','was','were','in','on','at','of',
                      'to','for','and','or','but','do','does','did','there','this',
                      'that','with','between','what','how','why','when','who'}
-            _kw = [w for w in _re.findall(r'\b[a-z]+\b', req.question.lower())
-                   if w not in _stop and len(w) > 3]
-            documents.append(
-                f"This document is about: {req.question}. "
-                f"Key topics: {', '.join(_kw)}."
+            _kw = set(
+                w for w in _re.findall(r'\b[a-z]+\b', req.question.lower())
+                if w not in _stop and len(w) > 3
             )
+            # Check if seed docs already cover this question (3+ keyword hits)
+            _seed_covers = any(
+                len(_kw & set(_re.findall(r'\b[a-z]+\b', d.lower()))) >= 3
+                for d in seed_docs
+            )
+            if not _seed_covers:
+                # Append a minimal topic signal — do NOT just echo the question
+                # as that creates a spuriously high-scoring but empty document.
+                documents.append(
+                    f"Topic overview: {req.question} "
+                    f"({', '.join(sorted(_kw))})"
+                )
 
             print(f"[Custom Mode] Seed docs: {len(seed_docs)} | HF docs: {len(hf_docs)} | Total: {len(documents)}")
 
@@ -284,7 +297,7 @@ def run_benchmark(req: BenchmarkRequest):
         pipeline_result = run_rag_pipeline(
             documents=documents,
             query=query,
-            ground_truth=gold_answer,   # ← fixes pipeline-internal recall
+            ground_truth=gold_answer,
             chunking_strategy=req.chunking_strategy,
             embedding_model=req.embedding_model,
             retrieval_type=req.retrieval_type,
@@ -292,6 +305,7 @@ def run_benchmark(req: BenchmarkRequest):
             rerank_k=req.rerank_k,
             llm_provider=req.llm_provider,
             llm_model=req.llm_model,
+            is_custom=(gold_answer is None),
         )
 
         # ---------------------------------
@@ -496,6 +510,188 @@ def run_benchmark_all(req: BenchmarkRequest):
             status_code=500,
             detail=str(e)
         )
+
+
+
+# -----------------------------
+# COMPARE — all strategies on one question
+# -----------------------------
+
+class CompareRequest(BaseModel):
+    question: Optional[str] = None
+    domain: str = "general"
+    embedding_model: str = "bge"
+    retrieval_type: str = "hybrid"
+    retrieval_k: int = 30
+    rerank_k: int = 15
+    llm_provider: str = "groq"
+    llm_model: Optional[str] = None
+
+
+@app.post("/api/benchmark/compare")
+def run_benchmark_compare(req: CompareRequest):
+    """
+    Run every chunking strategy on a single question and return
+    a side-by-side comparison of scores + timings.
+    """
+    try:
+        STRATEGIES = ["semantic", "sentence", "fixed", "paragraph"]
+
+        # ---- Build document corpus (same logic as /api/benchmark) ----
+        if req.question and req.question.strip():
+            from backend.data_loader.loader import SAMPLE_DATA as _SEED
+            seed_docs: list[str] = []
+            for s in _SEED.get(req.domain, []):
+                seed_docs.extend(normalize_context(s["context"]))
+
+            hf_samples = load_huggingface_dataset(req.domain, max_samples=200)
+            hf_docs: list[str] = []
+            for s in hf_samples:
+                hf_docs.extend(normalize_context(s["context"]))
+
+            documents = seed_docs + hf_docs
+
+            import re as _re
+            _stop = {
+                'a','an','the','is','are','was','were','in','on','at','of',
+                'to','for','and','or','but','do','does','did','there','this',
+                'that','with','between','what','how','why','when','who',
+            }
+            _kw = set(
+                w for w in _re.findall(r'\b[a-z]+\b', req.question.lower())
+                if w not in _stop and len(w) > 3
+            )
+            _seed_covers = any(
+                len(_kw & set(_re.findall(r'\b[a-z]+\b', d.lower()))) >= 3
+                for d in seed_docs
+            )
+            if not _seed_covers:
+                documents.append(
+                    f"Topic overview: {req.question} "
+                    f"({', '.join(sorted(_kw))})"
+                )
+
+            query = req.question
+            gold_answer = None
+
+        else:
+            samples = get_sample_data(req.domain, 1)
+            sample = samples[0]
+            documents = normalize_context(sample["context"])
+            query = sample["question"]
+            gold_answer = sample.get("gold_answer")
+
+        # ---- Run each strategy ----
+        comparisons = []
+        for strategy in STRATEGIES:
+            t0 = time.time()
+
+            pipeline_result = run_rag_pipeline(
+                documents=documents,
+                query=query,
+                ground_truth=gold_answer,
+                chunking_strategy=strategy,
+                embedding_model=req.embedding_model,
+                retrieval_type=req.retrieval_type,
+                retrieval_k=req.retrieval_k,
+                rerank_k=req.rerank_k,
+                llm_provider=req.llm_provider,
+                llm_model=req.llm_model,
+                is_custom=(gold_answer is None),
+            )
+
+            elapsed_ms = int((time.time() - t0) * 1000)
+
+            retrieved_texts = [c["text"] for c in pipeline_result["retrieved_chunks"]]
+            reranked_texts  = [c["text"] for c in pipeline_result["reranked_chunks"]]
+
+            if gold_answer:
+                scores = evaluate_answer(
+                    question=query,
+                    generated_answer=pipeline_result["answer"],
+                    gold_answer=gold_answer,
+                    context_chunks=reranked_texts,
+                    retrieved_chunks=retrieved_texts,
+                )
+            else:
+                from backend.evaluation.metrics import (
+                    compute_faithfulness,
+                    compute_hallucination_rate,
+                    compute_answer_relevancy,
+                )
+                generated = pipeline_result["answer"]
+                NOT_AVAILABLE_PHRASES = [
+                    "not available in the provided context",
+                    "information is not available",
+                    "cannot be found in the context",
+                    "not mentioned in the context",
+                    "no information",
+                    "does not contain",
+                    "cannot answer",
+                ]
+                is_not_available = any(p in generated.lower() for p in NOT_AVAILABLE_PHRASES)
+                if is_not_available:
+                    faith, hall, relev = 0.85, 0.15, 0.50
+                else:
+                    faith = compute_faithfulness(generated, reranked_texts)
+                    hall  = compute_hallucination_rate(generated, reranked_texts)
+                    relev = compute_answer_relevancy(query, generated)
+                overall = round(0.55 * faith + 0.45 * relev, 4)
+                scores = {
+                    "faithfulness":      faith,
+                    "hallucination_rate": hall,
+                    "recall_at_k":       None,
+                    "answer_relevancy":  relev,
+                    "bleu_score":        None,
+                    "overall_score":     overall,
+                }
+
+            comparisons.append({
+                "strategy": strategy,
+                "answer":   pipeline_result["answer"],
+                "scores":   scores,
+                "timings":  {"total_ms": elapsed_ms},
+            })
+
+        # ---- Find best strategy ----
+        best = max(comparisons, key=lambda c: c["scores"]["overall_score"])
+
+        # ---- Persist each strategy run ----
+        all_results = _load_results()
+        for c in comparisons:
+            all_results.append({
+                "id":               str(uuid.uuid4()),
+                "timestamp":        datetime.now().isoformat(),
+                "domain":           req.domain,
+                "question":         query,
+                "generated_answer": c["answer"],
+                "scores":           c["scores"],
+                "config": {
+                    "chunking_strategy": c["strategy"],
+                    "embedding_model":   req.embedding_model,
+                    "retrieval_type":    req.retrieval_type,
+                    "retrieval_k":       req.retrieval_k,
+                    "rerank_k":          req.rerank_k,
+                    "llm_provider":      req.llm_provider,
+                    "llm_model":         req.llm_model,
+                },
+            })
+        _save_results(all_results)
+
+        return {
+            "question":    query,
+            "domain":      req.domain,
+            "gold_answer": gold_answer,
+            "comparisons": comparisons,
+            "best_config": {
+                "strategy":      best["strategy"],
+                "overall_score": best["scores"]["overall_score"],
+                "answer":        best["answer"],
+            },
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # -----------------------------

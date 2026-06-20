@@ -43,7 +43,28 @@ def generate_with_groq(
             context_chunks[:10]
         )[:6000]
 
-        prompt = f"""You are an expert Retrieval-Augmented Generation (RAG) assistant.
+        # Use different prompts for custom vs benchmark questions
+        if is_custom:
+            prompt = f"""You are a knowledgeable AI assistant helping evaluate RAG pipelines.
+
+You have been provided with retrieved context passages below. Use them as your PRIMARY source of information.
+
+RULES:
+1. Prioritize the context: if the context contains relevant information, base your answer on it.
+2. If the context is insufficient or does not cover the question, use your own knowledge to provide a complete, accurate answer — do NOT say the information is unavailable.
+3. Start your answer directly with the key facts (e.g. "World War I was caused by...").
+4. Keep your answer concise and informative: 3-5 sentences covering the main points.
+5. Do not mention the context, do not say "Based on the context", and do not use filler phrases.
+
+Retrieved Context:
+{context}
+
+Question:
+{query}
+
+Answer:"""
+        else:
+            prompt = f"""You are an expert Retrieval-Augmented Generation (RAG) assistant.
 
 Your task is to answer the question using ONLY the provided context below.
 

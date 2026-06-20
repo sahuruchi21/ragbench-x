@@ -15,18 +15,22 @@ export default function Dashboard() {
   const [results, setResults] = useState([])
   const [loading, setLoading] = useState(true)
 
+  const [totalRealRuns, setTotalRealRuns] = useState(0)
+
   useEffect(() => {
     Promise.all([
-      api.getDatasets().catch(() => ({ datasets: [] })),
+      api.getDatasets().catch(() => ({ domains: [] })),
       api.getResults(null, 20).catch(() => ({ results: [], total: 0 })),
     ]).then(([ds, res]) => {
-      setDatasets(ds.datasets || [])
+      // /api/datasets returns { domains: [...] }
+      setDatasets(ds.domains || ds.datasets || [])
       setResults(res.results || [])
+      setTotalRealRuns(res.total || (res.results || []).length)
       setLoading(false)
     })
   }, [])
 
-  const totalRuns = results.length
+  const totalRuns = totalRealRuns
   const avgScore = results.length
     ? (results.reduce((s, r) => s + (r.scores?.overall_score || 0), 0) / results.length).toFixed(3)
     : '—'
