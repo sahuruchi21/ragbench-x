@@ -71,6 +71,24 @@ def agg_by_domain_strategy(metric):
             bucket[(dom, strat)].append(val)
     return {k: np.mean(v) for k, v in bucket.items()}
 
+def agg_with_stats(metric):
+    """Returns (mean, std, n) per (domain, strategy). Used for error bars."""
+    bucket = defaultdict(list)
+    for r in records:
+        dom   = r.get("domain", "")
+        strat = (r.get("config") or {}).get("chunking_strategy", "")
+        val   = r.get("scores", {}).get(metric)
+        if dom in DOMAIN_ORDER and strat in STRATEGY_ORDER and val is not None:
+            bucket[(dom, strat)].append(val)
+    result = {}
+    for k, v in bucket.items():
+        result[k] = (
+            np.mean(v),
+            np.std(v) if len(v) > 1 else 0.0,
+            len(v)
+        )
+    return result
+
 def agg_by_strategy(metric):
     bucket = defaultdict(list)
     for r in records:
@@ -90,42 +108,91 @@ def agg_by_domain(metric):
     return {k: np.mean(v) for k, v in bucket.items()}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 5.1 — Faithfulness Score Comparison (grouped bar by domain + strategy)
+# Figure 5.1 — Faithfulness Score Comparison  (with ±1 SD error bars)
 # ─────────────────────────────────────────────────────────────────────────────
 def fig51_faithfulness():
-    data = agg_by_domain_strategy("faithfulness")
+    stats = agg_with_stats("faithfulness")
 
-    x     = np.arange(len(DOMAIN_ORDER))
-    width = 0.20
+    x       = np.arange(len(DOMAIN_ORDER))
+    width   = 0.20
     offsets = np.linspace(-1.5, 1.5, 4) * width
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(13, 7))
     apply_dark_theme(fig, ax)
 
+    LOW_N = 5   # flag bars with fewer than this many samples
+
     for i, strat in enumerate(STRATEGY_ORDER):
-        vals = [data.get((dom, strat), 0) * 100 for dom in DOMAIN_ORDER]
-        bars = ax.bar(x + offsets[i], vals, width * 0.9,
-                      label=strat.capitalize(),
-                      color=STRATEGY_COLORS[strat],
-                      edgecolor=BG, linewidth=0.5, zorder=3)
-        for bar, v in zip(bars, vals):
+        means = []
+        stds  = []
+        ns    = []
+        for dom in DOMAIN_ORDER:
+            entry = stats.get((dom, strat))
+            if entry:
+                m, s, n = entry
+                means.append(m * 100)
+                stds.append(s * 100)
+                ns.append(n)
+            else:
+                means.append(0); stds.append(0); ns.append(0)
+
+        bars = ax.bar(
+            x + offsets[i], means, width * 0.88,
+            label=strat.capitalize(),
+            color=STRATEGY_COLORS[strat],
+            edgecolor=BG, linewidth=0.5, zorder=3
+        )
+        # Error bars (±1 SD)
+        ax.errorbar(
+            x + offsets[i], means, yerr=stds,
+            fmt="none",
+            ecolor="white", elinewidth=1.5, capsize=5, capthick=1.5,
+            zorder=5
+        )
+        # Labels: mean value + sample size
+        for bar, v, s, n in zip(bars, means, stds, ns):
             if v > 0:
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                        f"{v:.1f}", ha="center", va="bottom",
-                        fontsize=8, color=SUBTEXT, fontweight="bold")
+                # Mean value on top of bar
+                label_y = v + s + 1.2
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, label_y,
+                    f"{v:.1f}",
+                    ha="center", va="bottom",
+                    fontsize=8, color=TEXT, fontweight="bold"
+                )
+                # Sample size below the mean label
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, label_y + 3.0,
+                    f"n={n}" + (" ⚠" if n < LOW_N else ""),
+                    ha="center", va="bottom",
+                    fontsize=7,
+                    color="#f87171" if n < LOW_N else SUBTEXT
+                )
 
     ax.set_xticks(x)
     ax.set_xticklabels([d.capitalize() for d in DOMAIN_ORDER], fontsize=12)
-    ax.set_ylim(0, 115)
+    ax.set_ylim(0, 135)
     ax.set_ylabel("Faithfulness Score (%)", fontsize=12, color=SUBTEXT)
-    ax.set_title("Figure 5.1 — Faithfulness Score Comparison\nby Domain & Chunking Strategy",
-                 fontsize=14, fontweight="bold", color=TEXT, pad=16)
+    ax.set_title(
+        "Figure 5.1 — Faithfulness Score Comparison\n"
+        "by Domain & Chunking Strategy  (error bars = ±1 SD)",
+        fontsize=14, fontweight="bold", color=TEXT, pad=16
+    )
     ax.yaxis.grid(True, color=GRID, linewidth=0.6, zorder=0)
     ax.set_axisbelow(True)
 
-    leg = ax.legend(title="Chunking Strategy", frameon=True,
-                    facecolor=BG, edgecolor=BORDER,
-                    labelcolor=TEXT, title_fontsize=10, fontsize=10)
+    # Footnote explaining ⚠
+    fig.text(
+        0.01, 0.01,
+        "⚠ = fewer than 5 samples — interpret with caution",
+        fontsize=9, color="#f87171", style="italic"
+    )
+
+    leg = ax.legend(
+        title="Chunking Strategy", frameon=True,
+        facecolor=BG, edgecolor=BORDER,
+        labelcolor=TEXT, title_fontsize=10, fontsize=10
+    )
     leg.get_title().set_color(SUBTEXT)
 
     plt.tight_layout()
@@ -230,16 +297,15 @@ def fig53_answer_relevance():
     print(f"  ✓ {out.name}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 5.4 — Hallucination Rate Comparison (stacked / grouped)
+# Figure 5.4 — Hallucination Rate Comparison  (with ±1 SD error bars)
 # ─────────────────────────────────────────────────────────────────────────────
 def fig54_hallucination():
-    data = agg_by_domain_strategy("hallucination_rate")
+    stats = agg_with_stats("hallucination_rate")
 
-    x     = np.arange(len(DOMAIN_ORDER))
-    width = 0.20
+    x       = np.arange(len(DOMAIN_ORDER))
+    width   = 0.20
     offsets = np.linspace(-1.5, 1.5, 4) * width
 
-    # red-toned palette for danger metric
     hall_colors = {
         "semantic":  "#ef4444",
         "sentence":  "#f97316",
@@ -247,38 +313,82 @@ def fig54_hallucination():
         "paragraph": "#ec4899",
     }
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    LOW_N = 5
+    fig, ax = plt.subplots(figsize=(13, 7))
     apply_dark_theme(fig, ax)
 
     for i, strat in enumerate(STRATEGY_ORDER):
-        vals = [data.get((dom, strat), 0) * 100 for dom in DOMAIN_ORDER]
-        bars = ax.bar(x + offsets[i], vals, width * 0.9,
-                      label=strat.capitalize(),
-                      color=hall_colors[strat],
-                      edgecolor=BG, linewidth=0.5, zorder=3, alpha=0.92)
-        for bar, v in zip(bars, vals):
+        means, stds, ns = [], [], []
+        for dom in DOMAIN_ORDER:
+            entry = stats.get((dom, strat))
+            if entry:
+                m, s, n = entry
+                means.append(m * 100)
+                stds.append(s * 100)
+                ns.append(n)
+            else:
+                means.append(0); stds.append(0); ns.append(0)
+
+        bars = ax.bar(
+            x + offsets[i], means, width * 0.88,
+            label=strat.capitalize(),
+            color=hall_colors[strat],
+            edgecolor=BG, linewidth=0.5, zorder=3, alpha=0.92
+        )
+        ax.errorbar(
+            x + offsets[i], means, yerr=stds,
+            fmt="none",
+            ecolor="white", elinewidth=1.5, capsize=5, capthick=1.5,
+            zorder=5
+        )
+        for bar, v, s, n in zip(bars, means, stds, ns):
             if v > 0:
-                ax.text(bar.get_x() + bar.get_width()/2,
-                        bar.get_height() + 0.3,
-                        f"{v:.1f}", ha="center", va="bottom",
-                        fontsize=8, color=SUBTEXT, fontweight="bold")
+                label_y = v + s + 0.8
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, label_y,
+                    f"{v:.1f}",
+                    ha="center", va="bottom",
+                    fontsize=8, color=TEXT, fontweight="bold"
+                )
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, label_y + 2.5,
+                    f"n={n}" + (" ⚠" if n < LOW_N else ""),
+                    ha="center", va="bottom",
+                    fontsize=7,
+                    color="#f87171" if n < LOW_N else SUBTEXT
+                )
 
     ax.set_xticks(x)
     ax.set_xticklabels([d.capitalize() for d in DOMAIN_ORDER], fontsize=12)
-    ax.set_ylim(0, 60)
+    ax.set_ylim(0, 75)
     ax.set_ylabel("Hallucination Rate (%)  ← Lower is better", fontsize=12, color=SUBTEXT)
-    ax.set_title("Figure 5.4 — Hallucination Rate Comparison\nby Domain & Chunking Strategy",
-                 fontsize=14, fontweight="bold", color=TEXT, pad=16)
+    ax.set_title(
+        "Figure 5.4 — Hallucination Rate Comparison\n"
+        "by Domain & Chunking Strategy  (error bars = ±1 SD)",
+        fontsize=14, fontweight="bold", color=TEXT, pad=16
+    )
     ax.yaxis.grid(True, color=GRID, linewidth=0.6, zorder=0)
     ax.set_axisbelow(True)
 
-    # Add threshold line
+    # Threshold lines
     ax.axhline(y=15, color="#64748b", linestyle="--", linewidth=1.2, zorder=5)
-    ax.text(3.7, 15.5, "15% threshold", color="#64748b", fontsize=9, va="bottom")
+    ax.text(3.62, 15.8, "15% acceptable threshold",
+            color="#64748b", fontsize=9, va="bottom")
+    ax.axhline(y=30, color="#dc2626", linestyle=":", linewidth=1.0, zorder=5)
+    ax.text(3.62, 30.8, "30% critical threshold",
+            color="#dc2626", fontsize=9, va="bottom")
 
-    leg = ax.legend(title="Chunking Strategy", frameon=True,
-                    facecolor=BG, edgecolor=BORDER,
-                    labelcolor=TEXT, title_fontsize=10, fontsize=10)
+    fig.text(
+        0.01, 0.01,
+        "⚠ = fewer than 5 samples — interpret with caution",
+        fontsize=9, color="#f87171", style="italic"
+    )
+
+    leg = ax.legend(
+        title="Chunking Strategy", frameon=True,
+        facecolor=BG, edgecolor=BORDER,
+        labelcolor=TEXT, title_fontsize=10, fontsize=10
+    )
     leg.get_title().set_color(SUBTEXT)
 
     plt.tight_layout()
